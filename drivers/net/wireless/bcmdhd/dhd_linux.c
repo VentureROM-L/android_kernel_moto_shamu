@@ -4551,6 +4551,11 @@ dhd_attach(osl_t *osh, struct dhd_bus *bus, uint bus_hdrlen)
 	dhd->pub.skip_fc = dhd_wlfc_skip_fc;
 	dhd->pub.plat_init = dhd_wlfc_plat_init;
 	dhd->pub.plat_deinit = dhd_wlfc_plat_deinit;
+#ifdef WLFC_STATE_PREALLOC
+	dhd->pub.wlfc_state = MALLOC(dhd->pub.osh, sizeof(athost_wl_status_info_t));
+	if (dhd->pub.wlfc_state == NULL)
+		DHD_ERROR(("%s: wlfc_state prealloc failed\n", __FUNCTION__));
+#endif /* WLFC_STATE_PREALLOC */
 #endif /* PROP_TXSTATUS */
 
 	/* Initialize other structure content */
@@ -5256,6 +5261,9 @@ dhd_preinit_ioctls(dhd_pub_t *dhd)
 #ifdef WLTDLS
 	dhd->tdls_enable = FALSE;
 #endif /* WLTDLS */
+#ifdef DONGLE_ENABLE_ISOLATION
+	dhd->dongle_isolation = TRUE;
+#endif /* DONGLE_ENABLE_ISOLATION */
 	dhd->suspend_bcn_li_dtim = CUSTOM_SUSPEND_BCN_LI_DTIM;
 	DHD_TRACE(("Enter %s\n", __FUNCTION__));
 	dhd->op_mode = 0;
@@ -6374,6 +6382,11 @@ void dhd_detach(dhd_pub_t *dhdp)
 		if (dhdp->prot)
 			dhd_prot_detach(dhdp);
 	}
+#ifdef PROP_TXSTATUS
+#ifdef WLFC_STATE_PREALLOC
+	MFREE(dhd->pub.osh, dhd->pub.wlfc_state, sizeof(athost_wl_status_info_t));
+#endif /* WLFC_STATE_PREALLOC */
+#endif /* PROP_TXSTATUS */
 
 #ifdef ARP_OFFLOAD_SUPPORT
 	if (dhd_inetaddr_notifier_registered) {
