@@ -15,6 +15,10 @@
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
 #include <trace/events/power.h>
+#include <linux/moduleparam.h>
+
+static bool enable_si_ws = false;
+module_param(enable_si_ws, bool, 0644);
 
 #include "power.h"
 
