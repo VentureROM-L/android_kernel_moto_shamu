@@ -1235,6 +1235,13 @@ static int wcd9xxx_i2c_probe(struct i2c_client *client,
 			dev_dbg(&client->dev, "%s:Platform data\n"
 				"from device tree\n", __func__);
 			pdata = wcd9xxx_populate_dt_pdata(&client->dev);
+			if (!pdata) {
+				dev_err(&client->dev,
+					"%s: Fail to obtain pdata from device tree\n",
+					 __func__);
+				ret = -EINVAL;
+				goto fail;
+			}
 			client->dev.platform_data = pdata;
 		} else {
 			dev_dbg(&client->dev, "%s:Platform data from\n"
@@ -1327,6 +1334,7 @@ err_supplies:
 	wcd9xxx_disable_supplies(wcd9xxx, pdata);
 err_codec:
 	kfree(wcd9xxx);
+	dev_set_drvdata(&client->dev, NULL);
 fail:
 	return ret;
 }
@@ -1339,6 +1347,7 @@ static int wcd9xxx_i2c_remove(struct i2c_client *client)
 	wcd9xxx = dev_get_drvdata(&client->dev);
 	wcd9xxx_disable_supplies(wcd9xxx, pdata);
 	wcd9xxx_device_exit(wcd9xxx);
+	dev_set_drvdata(&client->dev, NULL);
 	return 0;
 }
 
@@ -1726,6 +1735,14 @@ static int wcd9xxx_slim_probe(struct slim_device *slim)
 	if (slim->dev.of_node) {
 		dev_info(&slim->dev, "Platform data from device tree\n");
 		pdata = wcd9xxx_populate_dt_pdata(&slim->dev);
+		if (!pdata) {
+			dev_err(&slim->dev,
+				"%s: Fail to obtain pdata from device tree\n",
+				__func__);
+			ret = -EINVAL;
+			goto err;
+		}
+
 		ret = wcd9xxx_dt_parse_slim_interface_dev_info(&slim->dev,
 				&pdata->slimbus_slave_device);
 		if (ret) {
@@ -1849,6 +1866,7 @@ err_supplies:
 	wcd9xxx_disable_supplies(wcd9xxx, pdata);
 err_codec:
 	kfree(wcd9xxx);
+	slim_set_clientdata(slim, NULL);
 err:
 	return ret;
 }
@@ -1867,6 +1885,7 @@ static int wcd9xxx_slim_remove(struct slim_device *pdev)
 	slim_remove_device(wcd9xxx->slim_slave);
 	wcd9xxx_disable_supplies(wcd9xxx, pdata);
 	wcd9xxx_device_exit(wcd9xxx);
+	slim_set_clientdata(pdev, NULL);
 	return 0;
 }
 

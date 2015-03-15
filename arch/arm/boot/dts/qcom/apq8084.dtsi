@@ -923,7 +923,7 @@
 		qcom,noise-rjct-scl = <1>;
 		qcom,noise-rjct-sda = <1>;
 		qcom,i2c-bus-freq = <400000>;
-		qcom,i2c-src-freq = <50000000>;
+		qcom,i2c-src-freq = <19200000>;
 		qcom,sda-gpio = <&msmgpio 10 0>;
 		qcom,scl-gpio = <&msmgpio 11 0>;
 		qcom,master-id = <86>;
@@ -979,7 +979,7 @@
 		qcom,noise-rjct-scl = <0>;
 		qcom,noise-rjct-sda = <0>;
 		qcom,i2c-bus-freq = <400000>;
-		qcom,i2c-src-freq = <50000000>;
+		qcom,i2c-src-freq = <19200000>;
 		qcom,sda-gpio = <&msmgpio 61 0>;
 		qcom,scl-gpio = <&msmgpio 62 0>;
 		qcom,master-id = <84>;
@@ -5382,6 +5382,7 @@
 		reg = <0xFE0C900C  0x4>,
 		      <0xFE0C9010  0x4>;
 		reg-names = "avtimer_lsb_addr", "avtimer_msb_addr";
+		qcom,clk_div = <27>;
 	};
 };
 

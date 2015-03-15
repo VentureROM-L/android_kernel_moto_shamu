@@ -1684,8 +1684,9 @@ static int mdss_fb_open(struct fb_info *info, int user)
 	struct task_struct *task = current->group_leader;
 
 	if (mfd->shutdown_pending) {
-		pr_err("Shutdown pending. Aborting operation. Request from pid:%d name=%s\n",
-				pid, task->comm);
+		pr_err_once("Shutdown pending. Aborting operation. Request from pid:%d name=%s\n",
+			pid, task->comm);
+		sysfs_notify(&mfd->fbi->dev->kobj, NULL, "show_blank_event");
 		return -EPERM;
 	}
 
@@ -1764,8 +1765,8 @@ static int mdss_fb_release_all(struct fb_info *info, bool release_all)
 	struct task_struct *task = current->group_leader;
 
 	if (!mfd->ref_cnt) {
-		pr_info("try to close unopened fb %d! from %s\n", mfd->index,
-			task->comm);
+		pr_info("try to close unopened fb %d! from pid:%d name:%s\n",
+			mfd->index, pid, task->comm);
 		return -EINVAL;
 	}
 
@@ -1914,18 +1915,47 @@ static void __mdss_fb_wait_for_fence_sub(struct msm_sync_pt_data *sync_pt_data,
 	struct sync_fence **fences, int fence_cnt)
 {
 	int i, ret = 0;
+	unsigned long max_wait = msecs_to_jiffies(WAIT_MAX_FENCE_TIMEOUT);
+	unsigned long timeout = jiffies + max_wait;
+	long wait_ms, wait_jf;
 
 	/* buf sync */
 	for (i = 0; i < fence_cnt && !ret; i++) {
-		ret = sync_fence_wait(fences[i],
-				WAIT_FENCE_FIRST_TIMEOUT);
+		wait_jf = timeout - jiffies;
+		wait_ms = jiffies_to_msecs(wait_jf);
+
+		/*
+		 * In this loop, if one of the previous fence took long
+		 * time, give a chance for the next fence to check if
+		 * fence is already signalled. If not signalled it breaks
+		 * in the final wait timeout.
+		 */
+		if (wait_jf < 0)
+			wait_ms = WAIT_MIN_FENCE_TIMEOUT;
+		else
+			wait_ms = min_t(long, WAIT_FENCE_FIRST_TIMEOUT,
+					wait_ms);
+
+		ret = sync_fence_wait(fences[i], wait_ms);
+
 		if (ret == -ETIME) {
+			wait_jf = timeout - jiffies;
+			wait_ms = jiffies_to_msecs(wait_jf);
+			if (wait_jf < 0)
+				break;
+			else
+				wait_ms = min_t(long, WAIT_FENCE_FINAL_TIMEOUT,
+						wait_ms);
+
 			pr_warn("%s: sync_fence_wait timed out! ",
 					sync_pt_data->fence_name);
-			pr_cont("Waiting %ld more seconds\n",
-					WAIT_FENCE_FINAL_TIMEOUT/MSEC_PER_SEC);
-			ret = sync_fence_wait(fences[i],
-					WAIT_FENCE_FINAL_TIMEOUT);
+			pr_cont("Waiting %ld.%ld more seconds\n",
+				(wait_ms/MSEC_PER_SEC), (wait_ms%MSEC_PER_SEC));
+
+			ret = sync_fence_wait(fences[i], wait_ms);
+
+			if (ret == -ETIME)
+				break;
 		}
 		sync_fence_put(fences[i]);
 	}
@@ -2110,10 +2140,13 @@ static int mdss_fb_wait_for_kickoff(struct msm_fb_data_type *mfd)
 {
 	int ret = 0;
 
+	if (!mfd->wait_for_kickoff)
+		return mdss_fb_pan_idle(mfd);
+
 	ret = wait_event_timeout(mfd->kickoff_wait_q,
 			(!atomic_read(&mfd->kickoff_pending) ||
 			 mfd->shutdown_pending),
-			msecs_to_jiffies(WAIT_DISP_OP_TIMEOUT / 2));
+			msecs_to_jiffies(WAIT_DISP_OP_TIMEOUT));
 	if (!ret) {
 		pr_err("wait for kickoff timeout %d pending=%d\n",
 				ret, atomic_read(&mfd->kickoff_pending));
@@ -2149,10 +2182,19 @@ static int mdss_fb_pan_display_ex(struct fb_info *info,
 	if (var->yoffset > (info->var.yres_virtual - info->var.yres))
 		return -EINVAL;
 
-	ret = mdss_fb_pan_idle(mfd);
+	ret = mdss_fb_wait_for_kickoff(mfd);
 	if (ret) {
 		pr_err("Shutdown pending. Aborting operation\n");
 		return ret;
+	}
+
+	if (mfd->mdp.pre_commit_fnc) {
+		ret = mfd->mdp.pre_commit_fnc(mfd);
+		if (ret) {
+			pr_err("fb%d: pre commit failed %d\n",
+					mfd->index, ret);
+			return ret;
+		}
 	}
 
 	mutex_lock(&mfd->mdp_sync_pt_data.sync_mutex);
@@ -2797,12 +2839,15 @@ static int __ioctl_wait_idle(struct msm_fb_data_type *mfd, u32 cmd)
 	if (mfd->wait_for_kickoff &&
 		((cmd == MSMFB_OVERLAY_PREPARE) ||
 		(cmd == MSMFB_BUFFER_SYNC) ||
+		(cmd == MSMFB_OVERLAY_PLAY) ||
+		(cmd == MSMFB_OVERLAY_UNSET) ||
 		(cmd == MSMFB_OVERLAY_SET))) {
 		ret = mdss_fb_wait_for_kickoff(mfd);
 	} else if ((cmd != MSMFB_VSYNC_CTRL) &&
 		(cmd != MSMFB_OVERLAY_VSYNC_CTRL) &&
 		(cmd != MSMFB_ASYNC_BLIT) &&
 		(cmd != MSMFB_BLIT) &&
+		(cmd != MSMFB_DISPLAY_COMMIT) &&
 		(cmd != MSMFB_NOTIFY_UPDATE) &&
 		(cmd != MSMFB_OVERLAY_PREPARE)) {
 		ret = mdss_fb_pan_idle(mfd);
@@ -3068,7 +3113,7 @@ module_init(mdss_fb_init);
 int mdss_fb_suspres_panel(struct device *dev, void *data)
 {
 	struct msm_fb_data_type *mfd;
-	int rc;
+	int rc = 0;
 	u32 event;
 
 	if (!data) {
@@ -3081,10 +3126,14 @@ int mdss_fb_suspres_panel(struct device *dev, void *data)
 
 	event = *((bool *) data) ? MDSS_EVENT_RESUME : MDSS_EVENT_SUSPEND;
 
-	rc = mdss_fb_send_panel_event(mfd, event, NULL);
-	if (rc)
-		pr_warn("unable to %s fb%d (%d)\n",
-			event == MDSS_EVENT_RESUME ? "resume" : "suspend",
-			mfd->index, rc);
+	/* Do not send runtime suspend/resume for HDMI primary */
+	if (!mdss_fb_is_hdmi_primary(mfd)) {
+		rc = mdss_fb_send_panel_event(mfd, event, NULL);
+		if (rc)
+			pr_warn("unable to %s fb%d (%d)\n",
+				event == MDSS_EVENT_RESUME ?
+				"resume" : "suspend",
+				mfd->index, rc);
+	}
 	return rc;
 }

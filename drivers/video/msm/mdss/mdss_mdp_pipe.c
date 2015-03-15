@@ -598,6 +598,7 @@ static struct mdss_mdp_pipe *mdss_mdp_pipe_init(struct mdss_mdp_mixer *mixer,
 		mutex_init(&pipe->pp_res.hist.hist_mutex);
 		spin_lock_init(&pipe->pp_res.hist.hist_lock);
 		kref_init(&pipe->kref);
+		INIT_LIST_HEAD(&pipe->buf_queue);
 	} else if (pipe_share) {
 		/*
 		 * when there is no dedicated wfd blk, DMA pipe can be
@@ -891,6 +892,7 @@ int mdss_mdp_pipe_fetch_halt(struct mdss_mdp_pipe *pipe)
 			mdata->vbif_base + MMSS_VBIF_XIN_HALT_CTRL0);
 
 		if (sw_reset_avail) {
+			reg_val = readl_relaxed(mdata->mdp_base + sw_reset_off);
 			writel_relaxed(reg_val & ~BIT(pipe->sw_reset.bit_off),
 				mdata->mdp_base + sw_reset_off);
 			wmb();
@@ -980,6 +982,7 @@ int mdss_mdp_pipe_handoff(struct mdss_mdp_pipe *pipe)
 	pipe->is_handed_off = true;
 	pipe->play_cnt = 1;
 	kref_init(&pipe->kref);
+	INIT_LIST_HEAD(&pipe->buf_queue);
 
 error:
 	return rc;
@@ -1217,8 +1220,6 @@ static int mdss_mdp_src_addr_setup(struct mdss_mdp_pipe *pipe,
 	int ret = 0;
 
 	pr_debug("pnum=%d\n", pipe->num);
-
-	data.bwc_enabled = pipe->bwc_mode;
 
 	ret = mdss_mdp_data_check(&data, &pipe->src_planes);
 	if (ret)

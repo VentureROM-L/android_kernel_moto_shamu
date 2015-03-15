@@ -348,6 +348,20 @@ static u32 mdss_mdp_get_bw_vote_mode(struct mdss_mdp_pipe *pipe)
 	return bw_mode;
 }
 
+static u32 mdss_mdp_get_rotator_fps(struct mdss_mdp_pipe *pipe)
+{
+	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
+	u32 fps = DEFAULT_FRAME_RATE;
+
+	if (mdata->traffic_shaper_en)
+		fps = DEFAULT_ROTATOR_FRAME_RATE;
+
+	if (pipe->src.w >= 3840 || pipe->src.h >= 3840)
+		fps = ROTATOR_LOW_FRAME_RATE;
+
+	return fps;
+}
+
 /**
  * mdss_mdp_perf_calc_pipe() - calculate performance numbers required by pipe
  * @pipe:	Source pipe struct containing updated pipe params
@@ -383,8 +397,7 @@ int mdss_mdp_perf_calc_pipe(struct mdss_mdp_pipe *pipe,
 	src = pipe->src;
 
 	if (mixer->rotator_mode) {
-		if (mdata->traffic_shaper_en)
-			fps = DEFAULT_ROTATOR_FRAME_RATE;
+		fps = mdss_mdp_get_rotator_fps(pipe);
 		v_total = pipe->flags & MDP_ROT_90 ? pipe->dst.w : pipe->dst.h;
 	} else if (mixer->type == MDSS_MDP_MIXER_TYPE_INTF) {
 		struct mdss_panel_info *pinfo;
@@ -543,6 +556,10 @@ static void mdss_mdp_perf_calc_mixer(struct mdss_mdp_mixer *mixer,
 		if (!pinfo)	/* perf for bus writeback */
 			perf->bw_overlap =
 				fps * mixer->width * mixer->height * 3;
+		/* for command mode, run as fast as the link allows us */
+		else if ((pinfo->type == MIPI_CMD_PANEL) &&
+			 (pinfo->mipi.dsi_pclk_rate > perf->mdp_clk_rate))
+			perf->mdp_clk_rate = pinfo->mipi.dsi_pclk_rate;
 	}
 
 	/*
@@ -837,12 +854,11 @@ static void mdss_mdp_perf_calc_ctl(struct mdss_mdp_ctl *ctl,
 		left_plist, left_cnt, right_plist, right_cnt);
 
 	if (ctl->is_video_mode) {
-		if (perf->bw_overlap > perf->bw_prefill)
-			perf->bw_ctl = apply_fudge_factor(perf->bw_ctl,
-				&mdss_res->ib_factor_overlap);
-		else
-			perf->bw_ctl = apply_fudge_factor(perf->bw_ctl,
-				&mdss_res->ib_factor);
+		perf->bw_ctl =
+			max(apply_fudge_factor(perf->bw_overlap,
+				&mdss_res->ib_factor_overlap),
+			apply_fudge_factor(perf->bw_prefill,
+				&mdss_res->ib_factor));
 	}
 	pr_debug("ctl=%d clk_rate=%u\n", ctl->num, perf->mdp_clk_rate);
 	pr_debug("bw_overlap=%llu bw_prefill=%llu prefill_bytes=%d mode:%d\n",
