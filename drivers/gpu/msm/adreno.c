@@ -1556,7 +1556,7 @@ static int adreno_of_get_pdata(struct platform_device *pdev)
 	if (of_property_read_u32(pdev->dev.of_node,
 		"qcom,pm-qos-wakeup-latency",
 		&pdata->pm_qos_wakeup_latency))
-		pdata->pm_qos_wakeup_latency = 490;
+		pdata->pm_qos_wakeup_latency = 101;
 
 	if (of_property_read_u32(pdev->dev.of_node, "qcom,idle-timeout",
 		&pdata->idle_timeout))
@@ -1863,8 +1863,6 @@ static int _adreno_start(struct adreno_device *adreno_dev)
 	pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
 			pmqos_wakeup_vote);
 
-	pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
-			device->pwrctrl.pm_qos_wakeup_latency);
 	kgsl_cffdump_open(device);
 
 	kgsl_pwrctrl_set_state(device, KGSL_STATE_INIT);
@@ -1925,8 +1923,9 @@ static int _adreno_start(struct adreno_device *adreno_dev)
 
 	set_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv);
 
-	pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
-			device->pwrctrl.pm_qos_active_latency);
+	if (pmqos_active_vote != pmqos_wakeup_vote)
+		pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
+				pmqos_active_vote);
 
 	return 0;
 
@@ -1941,29 +1940,9 @@ error_clk_off:
 	/* set the state back to original state */
 	kgsl_pwrctrl_set_state(device, state);
 
-	pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
-			device->pwrctrl.pm_qos_active_latency);
-
-	return status;
-}
-
-static int _status;
-
-/**
- * _adreno_start_work() - Work handler for the low latency adreno_start
- * @work: Pointer to the work_struct for
- *
- * The work callbak for the low lantecy GPU start - this executes the core
- * _adreno_start function in the workqueue.
- */
-static void adreno_start_work(struct work_struct *work)
-{
-	struct adreno_device *adreno_dev = container_of(work,
-		struct adreno_device, start_work);
-	struct kgsl_device *device = &adreno_dev->dev;
-
-	/* Nice ourselves to be higher priority but not too high priority */
-	set_user_nice(current, _wake_nice);
+	if (pmqos_active_vote != pmqos_wakeup_vote)
+		pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
+				pmqos_active_vote);
 
 	return status;
 }
