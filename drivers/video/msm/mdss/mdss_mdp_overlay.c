@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -839,6 +839,7 @@ int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 	req->priority = pipe->priority;
 	pipe->req_data = *req;
 
+	mdss_mdp_pipe_sspp_term(pipe);
 	if (pipe->flags & MDP_OVERLAY_PP_CFG_EN) {
 		memcpy(&pipe->pp_cfg, &req->overlay_pp_cfg,
 					sizeof(struct mdp_overlay_pp_params));
@@ -969,6 +970,11 @@ static int mdss_mdp_overlay_set(struct msm_fb_data_type *mfd,
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
 	int ret;
 
+	if (req->flags & MDSS_MDP_ROT_ONLY) {
+		ret = mdss_mdp_rotator_setup(mfd, req);
+		return ret;
+	}
+
 	ret = mutex_lock_interruptible(&mdp5_data->ov_lock);
 	if (ret)
 		return ret;
@@ -978,9 +984,7 @@ static int mdss_mdp_overlay_set(struct msm_fb_data_type *mfd,
 		return -EPERM;
 	}
 
-	if (req->flags & MDSS_MDP_ROT_ONLY) {
-		ret = mdss_mdp_rotator_setup(mfd, req);
-	} else if (req->src.format == MDP_RGB_BORDERFILL) {
+	if (req->src.format == MDP_RGB_BORDERFILL) {
 		req->id = BORDERFILL_NDX;
 	} else {
 		struct mdss_mdp_pipe *pipe;
@@ -998,7 +1002,12 @@ static int mdss_mdp_overlay_set(struct msm_fb_data_type *mfd,
 	return ret;
 }
 
-struct mdss_mdp_data *mdss_mdp_overlay_buf_alloc(struct msm_fb_data_type *mfd,
+/*
+ * it's caller responsibility to acquire mdp5_data->list_lock while calling
+ * this function
+ */
+static
+struct mdss_mdp_data *__mdp_overlay_buf_alloc(struct msm_fb_data_type *mfd,
 		struct mdss_mdp_pipe *pipe)
 {
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
@@ -1016,20 +1025,36 @@ struct mdss_mdp_data *mdss_mdp_overlay_buf_alloc(struct msm_fb_data_type *mfd,
 		}
 
 		list_add(&buf->chunk_list, &mdp5_data->bufs_chunks);
-		for (i = 0; i < BUF_POOL_SIZE; i++)
+		for (i = 0; i < BUF_POOL_SIZE; i++) {
+			buf->state = MDP_BUF_STATE_UNUSED;
 			list_add(&buf[i].buf_list, &mdp5_data->bufs_pool);
+		}
 	}
 
 	buf = list_first_entry(&mdp5_data->bufs_pool,
 			struct mdss_mdp_data, buf_list);
-	list_move_tail(&buf->buf_list, &mdp5_data->bufs_used);
+	BUG_ON(buf->state != MDP_BUF_STATE_UNUSED);
+	buf->state = MDP_BUF_STATE_READY;
 	buf->last_alloc = local_clock();
 	buf->last_pipe = pipe;
 
+	list_move_tail(&buf->buf_list, &mdp5_data->bufs_used);
 	list_add_tail(&buf->pipe_list, &pipe->buf_queue);
-	buf->state = MDP_BUF_STATE_READY;
 
 	pr_debug("buffer alloc: %p\n", buf);
+
+	return buf;
+}
+
+struct mdss_mdp_data *mdss_mdp_overlay_buf_alloc(struct msm_fb_data_type *mfd,
+		struct mdss_mdp_pipe *pipe)
+{
+	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
+	struct mdss_mdp_data *buf;
+
+	mutex_lock(&mdp5_data->list_lock);
+	buf = __mdp_overlay_buf_alloc(mfd, pipe);
+	mutex_unlock(&mdp5_data->list_lock);
 
 	return buf;
 }
@@ -1052,7 +1077,11 @@ static void mdss_mdp_overlay_buf_deinit(struct msm_fb_data_type *mfd)
 	}
 }
 
-void mdss_mdp_overlay_buf_free(struct msm_fb_data_type *mfd,
+/*
+ * it's caller responsibility to acquire mdp5_data->list_lock while calling
+ * this function
+ */
+static void __mdp_overlay_buf_free(struct msm_fb_data_type *mfd,
 		struct mdss_mdp_data *buf)
 {
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
@@ -1068,6 +1097,16 @@ void mdss_mdp_overlay_buf_free(struct msm_fb_data_type *mfd,
 	pr_debug("buffer freed: %p\n", buf);
 
 	list_move_tail(&buf->buf_list, &mdp5_data->bufs_pool);
+}
+
+void mdss_mdp_overlay_buf_free(struct msm_fb_data_type *mfd,
+		struct mdss_mdp_data *buf)
+{
+	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
+
+	mutex_lock(&mdp5_data->list_lock);
+	__mdp_overlay_buf_free(mfd, buf);
+	mutex_unlock(&mdp5_data->list_lock);
 }
 
 static inline void __pipe_buf_mark_cleanup(struct msm_fb_data_type *mfd,
@@ -1092,7 +1131,7 @@ static void __mdss_mdp_overlay_free_list_purge(struct msm_fb_data_type *mfd)
 	pr_debug("purging fb%d free list\n", mfd->index);
 
 	list_for_each_entry_safe(buf, t, &mdp5_data->bufs_freelist, buf_list)
-		mdss_mdp_overlay_buf_free(mfd, buf);
+		__mdp_overlay_buf_free(mfd, buf);
 }
 
 static void __overlay_pipe_cleanup(struct msm_fb_data_type *mfd,
@@ -1110,7 +1149,7 @@ static void __overlay_pipe_cleanup(struct msm_fb_data_type *mfd,
 		 * soon as session is closed.
 		 */
 		if (pipe->flags & MDP_SECURE_DISPLAY_OVERLAY_SESSION)
-			mdss_mdp_overlay_buf_free(mfd, buf);
+			__mdp_overlay_buf_free(mfd, buf);
 	}
 
 	mdss_mdp_pipe_destroy(pipe);
@@ -1719,6 +1758,11 @@ static int mdss_mdp_overlay_unset(struct msm_fb_data_type *mfd, int ndx)
 	if (!mdp5_data || !mdp5_data->ctl)
 		return -ENODEV;
 
+	if (ndx & MDSS_MDP_ROT_SESSION_MASK) {
+		ret = mdss_mdp_rotator_unset(ndx);
+		return ret;
+	}
+
 	ret = mutex_lock_interruptible(&mdp5_data->ov_lock);
 	if (ret)
 		return ret;
@@ -1737,11 +1781,7 @@ static int mdss_mdp_overlay_unset(struct msm_fb_data_type *mfd, int ndx)
 
 	pr_debug("unset ndx=%x\n", ndx);
 
-	if (ndx & MDSS_MDP_ROT_SESSION_MASK) {
-		ret = mdss_mdp_rotator_unset(ndx);
-	} else {
-		ret = mdss_mdp_overlay_release(mfd, ndx);
-	}
+	ret = mdss_mdp_overlay_release(mfd, ndx);
 
 done:
 	mutex_unlock(&mdp5_data->ov_lock);
@@ -1854,7 +1894,7 @@ static int mdss_mdp_overlay_queue(struct msm_fb_data_type *mfd,
 	flags = (pipe->flags & MDP_SECURE_OVERLAY_SESSION);
 
 	mutex_lock(&mdp5_data->list_lock);
-	src_data = mdss_mdp_overlay_buf_alloc(mfd, pipe);
+	src_data = __mdp_overlay_buf_alloc(mfd, pipe);
 	if (!src_data) {
 		pr_err("unable to allocate source buffer\n");
 		ret = -ENOMEM;
@@ -1862,7 +1902,7 @@ static int mdss_mdp_overlay_queue(struct msm_fb_data_type *mfd,
 		ret = mdss_mdp_data_get(src_data, &req->data,
 				1, flags);
 		if (IS_ERR_VALUE(ret)) {
-			mdss_mdp_overlay_buf_free(mfd, src_data);
+			__mdp_overlay_buf_free(mfd, src_data);
 			pr_err("src_data pmem error\n");
 		}
 	}
@@ -1953,6 +1993,11 @@ static int mdss_mdp_overlay_play(struct msm_fb_data_type *mfd,
 
 	pr_debug("play req id=%x\n", req->id);
 
+	if (req->id & MDSS_MDP_ROT_SESSION_MASK) {
+		ret = mdss_mdp_rotator_play(mfd, req);
+		return ret;
+	}
+
 	ret = mutex_lock_interruptible(&mdp5_data->ov_lock);
 	if (ret)
 		return ret;
@@ -1962,9 +2007,7 @@ static int mdss_mdp_overlay_play(struct msm_fb_data_type *mfd,
 		goto done;
 	}
 
-	if (req->id & MDSS_MDP_ROT_SESSION_MASK) {
-		ret = mdss_mdp_rotator_play(mfd, req);
-	} else if (req->id == BORDERFILL_NDX) {
+	if (req->id == BORDERFILL_NDX) {
 		pr_debug("borderfill enable\n");
 		mdp5_data->borderfill_enable = true;
 		ret = mdss_mdp_overlay_free_fb_pipe(mfd);
@@ -2539,7 +2582,8 @@ static ssize_t hbm_show(struct device *dev,
 	}
 
 	return snprintf(buf, PAGE_SIZE, "%d\n",
-			ctl->panel_data->panel_info.hbm_state);
+			ctl->panel_data->panel_info.hbm_off_state ? 1 :
+				ctl->panel_data->panel_info.hbm_state);
 }
 
 static ssize_t hbm_store(struct device *dev,

@@ -385,7 +385,7 @@ int mdss_panel_check_status(struct mdss_dsi_ctrl_pdata *ctrl)
 	u8 pwr_mode = 0;
 	struct mdss_panel_esd_pdata *esd_data = &ctrl->panel_esd_data;
 
-	if (mdss_dsi_is_panel_on_interactive(&ctrl->panel_data)) {
+	if (!mdss_dsi_is_panel_on_interactive(&ctrl->panel_data)) {
 		ret = 1;
 		goto end;
 	}
@@ -713,6 +713,11 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 	} else
 		dison_recovery = 0;
 
+	if (ctrl->set_hbm && ctrl->panel_data.panel_info.hbm_off_state) {
+		ctrl->set_hbm(ctrl, 1);
+		ctrl->panel_data.panel_info.hbm_off_state = 0;
+	}
+
 	pr_info("%s-. Pwr_mode(0x0A) = 0x%x\n", __func__, pwr_mode);
 end:
 	pinfo->blank_state = MDSS_PANEL_BLANK_UNBLANK;
@@ -743,8 +748,10 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 	if (ctrl->panel_config.bare_board == true)
 		goto end;
 
-	if (ctrl->set_hbm)
+	if (ctrl->set_hbm && ctrl->panel_data.panel_info.hbm_state) {
 		ctrl->set_hbm(ctrl, 0);
+		ctrl->panel_data.panel_info.hbm_off_state = 1;
+	}
 
 	if (ctrl->off_cmds.cmd_cnt)
 		mdss_dsi_panel_cmds_send(ctrl, &ctrl->off_cmds);

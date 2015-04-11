@@ -1,13 +1,3 @@
-/*
- *  linux/arch/arm/vfp/vfpmodule.c
- *
- *  Copyright (C) 2004 ARM Limited.
- *  Written by Deep Blue Solutions Limited.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
 #include <linux/types.h>
 #include <linux/cpu.h>
 #include <linux/cpu_pm.h>
@@ -21,6 +11,7 @@
 #include <linux/uaccess.h>
 #include <linux/user.h>
 #include <linux/proc_fs.h>
+#include <linux/export.h>
 #include <linux/seq_file.h>
 #include <linux/export.h>
 
@@ -651,9 +642,9 @@ int vfp_restore_user_hwstate(struct user_vfp __user *ufp,
 static int vfp_hotplug(struct notifier_block *b, unsigned long action,
 	void *hcpu)
 {
-	if (action == CPU_DYING || action == CPU_DYING_FROZEN) {
-		vfp_force_reload((long)hcpu, current_thread_info());
-	} else if (action == CPU_STARTING || action == CPU_STARTING_FROZEN)
+	if (action == CPU_DYING || action == CPU_DYING_FROZEN)
+		vfp_current_hw_state[(long)hcpu] = NULL;
+	else if (action == CPU_STARTING || action == CPU_STARTING_FROZEN)
 		vfp_enable(NULL);
 	return NOTIFY_OK;
 }
@@ -751,9 +742,6 @@ static int __init vfp_init(void)
 {
 	unsigned int vfpsid;
 	unsigned int cpu_arch = cpu_architecture();
-#ifdef CONFIG_PROC_FS
-	static struct proc_dir_entry *procfs_entry;
-#endif
 	if (cpu_arch >= CPU_ARCH_ARMv6)
 		on_each_cpu(vfp_enable, NULL, 1);
 
@@ -828,14 +816,20 @@ static int __init vfp_init(void)
 		}
 	}
 
+	return 0;
+}
+
+static int __init vfp_procfs_init(void)
+{
 #ifdef CONFIG_PROC_FS
+	static struct proc_dir_entry *procfs_entry;
 	procfs_entry = proc_create("cpu/vfp_bounce", S_IRUGO, NULL,
 			&vfp_bounce_fops);
 	if (!procfs_entry)
 		pr_err("Failed to create procfs node for VFP bounce reporting\n");
 #endif
-
 	return 0;
 }
 
-core_initcall(vfp_init);
+arch_initcall(vfp_init);
+late_initcall(vfp_procfs_init);
